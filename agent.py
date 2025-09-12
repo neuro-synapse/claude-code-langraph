@@ -560,7 +560,8 @@ class QCFinding(BaseModel):
     issue: str
     fix: str
     evidence: Optional[str] = None
-    severity: Optional[Literal["minor", "major"]] = None
+    # Accept any string from model, normalize later to 'minor'/'major' buckets
+    severity: Optional[str] = None
     scope: Optional[str] = None
 
 
@@ -731,7 +732,25 @@ def qc_enhance(state: MeetingState, config: Optional[RunnableConfig] = None) -> 
     decisions_corr = [d.model_dump() if isinstance(d, Decision) else Decision(**d).model_dump() for d in result.corrections.decisions]
     open_q_corr = [q.model_dump() if isinstance(q, OpenQuestion) else OpenQuestion(**q).model_dump() for q in result.corrections.open_questions]
     resources_corr = [r.model_dump() if isinstance(r, ResourceRef) else ResourceRef(**r).model_dump() for r in result.corrections.resources]
-    findings = [f.model_dump() if isinstance(f, QCFinding) else QCFinding(**f).model_dump() for f in result.findings]
+    # Normalize finding severities to minor/major
+    def _norm_sev(s: Optional[str]) -> Optional[str]:
+        if not s:
+            return s
+        t = str(s).strip().lower()
+        if t in {"low", "minor", "trivial", "info"}:
+            return "minor"
+        if t in {"high", "major", "critical"}:
+            return "major"
+        if t in {"medium", "moderate"}:
+            return "minor"
+        return t
+
+    findings = []
+    for f in result.findings:
+        F = f if isinstance(f, QCFinding) else QCFinding(**f)
+        d = F.model_dump()
+        d["severity"] = _norm_sev(d.get("severity"))
+        findings.append(d)
 
     if require_approval:
         interrupt(
