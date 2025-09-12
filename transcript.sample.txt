@@ -1,0 +1,13 @@
+[00:00] Alice: Welcome everyone. Goal today is to lock the Q4 scope and timelines.
+[00:02] Bob: We have two options for scope: MVP by October 15, or a broader feature set that would slip into November.
+[00:05] Carol: Data team dependency: the Analytics API needs a minor version bump; SLA is currently 99.9% uptime.
+[00:08] Dave: CI is flaky; we had three pipeline failures last week. We may need to upgrade test runners and increase parallelism.
+[00:12] Bob: Proposal: ship the MVP v1 on October 15, then iterate on feature flags.
+[00:14] Alice: Agreed. Let’s capture action items and owners.
+[00:15] Carol: I’ll confirm the Analytics API schedule and any breaking changes.
+[00:17] Dave: I’ll draft a CI upgrade plan and estimate risk reduction.
+[00:20] Alice: Bob, please draft the MVP scope and rollout plan; we’ll review on Thursday.
+[00:22] Bob: Yes, I’ll share a PRD and a project plan in Drive.
+[00:25] Alice: Any open questions? Timing for customer pilot? Also, which metrics are must-have for v1?
+[00:28] Carol: Pilot timing depends on API readiness. Metrics: DAU, conversion rate, and error rate.
+[00:30] Alice: Great. Let’s close here and follow up on the action items.
