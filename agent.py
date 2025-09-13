@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 from langgraph.graph import MessagesState, StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 try:
     from langgraph.func import interrupt
 except Exception:
@@ -29,6 +30,11 @@ except Exception:
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
+import json
+import sqlite3
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+from pathlib import Path
 
 
 # =====================
@@ -72,6 +78,10 @@ class MeetingState(MessagesState):
     # Optional metadata supplied by caller
     metadata: Dict[str, Any]
 
+    # Memory tracking fields
+    meeting_id: str  # Unique identifier for this meeting
+    meeting_date: str  # ISO date of the meeting
+
     # Output of Step 1
     themes: List[Theme]
 
@@ -82,6 +92,11 @@ class MeetingState(MessagesState):
     actions: List[Dict[str, Any]]
     decisions: List[Dict[str, Any]]
     open_questions: List[Dict[str, Any]]
+
+    # Memory integration
+    previous_action_items: List[Dict[str, Any]]  # Action items from previous meetings
+    escalated_items: List[Dict[str, Any]]  # Items that need attention
+    memory_insights: List[str]  # AI-generated insights about recurring items
 
     # Aggregated resources (optional, collated during QC)
     resources: List[Dict[str, Any]]
@@ -179,7 +194,31 @@ def preprocess(state: MeetingState) -> Dict[str, Any]:
     transcript = state.get("transcript", "") or ""
     if not transcript.strip():
         raise ValueError("Missing 'transcript' in state.")
-    return {}
+
+    # Best-effort meeting_id/date derivation if absent
+    metadata = state.get("metadata", {}) or {}
+
+    def _slug(s: str) -> str:
+        keep = [c.lower() if c.isalnum() else "-" for c in str(s)]
+        slug = "".join(keep)
+        while "--" in slug:
+            slug = slug.replace("--", "-")
+        return slug.strip("-") or "meeting"
+
+    updates: Dict[str, Any] = {}
+    mdate = state.get("meeting_date") or metadata.get("date")
+    if not mdate:
+        mdate = datetime.utcnow().strftime("%Y-%m-%d")
+        updates["meeting_date"] = mdate
+    else:
+        updates["meeting_date"] = mdate
+
+    mid = state.get("meeting_id")
+    if not mid:
+        title = metadata.get("title") or "meeting"
+        updates["meeting_id"] = f"{mdate}-{_slug(title)[:40]}"
+
+    return updates
 
 
 # =======================
@@ -236,26 +275,121 @@ def extract_themes(state: MeetingState, config: Optional[RunnableConfig] = None)
 
     # Ask the model to return the Pydantic-validated structure
     structured = llm.with_structured_output(ThemeList)
-    result = structured.invoke(messages)
+    themes: List[Theme] = []
+    parsed_ok = False
+    try:
+        result = structured.invoke(messages)
+        if isinstance(result, ThemeList):
+            themes = result.themes
+        else:
+            themes = [Theme(**t) for t in result.get("themes", [])]
+        parsed_ok = len(themes) > 0
+    except Exception:
+        parsed_ok = False
 
-    # Normalize to dict
-    themes: List[Theme]
-    if isinstance(result, ThemeList):
-        themes = result.themes
-    else:
-        # If the LC wrapper returns a raw dict
-        themes = [Theme(**t) for t in result.get("themes", [])]
+    # Fallback: force JSON-only response and parse manually if needed
+    if not parsed_ok:
+        schema_hint = (
+            "Return ONLY JSON matching this exact schema, no extra text.\n"
+            "{\n  \"themes\": [\n    {\n      \"id\": 1,\n      \"title\": \"Short title\",\n      \"summary\": \"One sentence summary.\",\n      \"time_percent\": 20,\n      \"participants\": [\"Alice\", \"Bob\"],\n      \"tier\": \"PRIMARY\",\n      \"flags\": {\n        \"decision\": false,\n        \"action\": true,\n        \"question\": false,\n        \"dependency\": false\n      }\n    }\n  ]\n}"
+        )
+        messages2 = [
+            SystemMessage(content=MASTER_THEME_PROMPT + "\n\nSTRICT: " + schema_hint),
+            HumanMessage(content=f"Transcript:\n{transcript}"),
+        ]
+        raw = llm.invoke(messages2)
+        raw_text = getattr(raw, "content", "") if raw is not None else ""
+        # Strip code fences if present
+        raw_text = raw_text.strip()
+        if raw_text.startswith("```"):
+            # remove first fence line and optional language
+            raw_text = "\n".join(raw_text.splitlines()[1:])
+            if raw_text.endswith("```"):
+                raw_text = "\n".join(raw_text.splitlines()[:-1])
+        try:
+            data = json.loads(raw_text)
+            items = data.get("themes", []) if isinstance(data, dict) else []
+        except Exception:
+            items = []
+
+        # Lenient normalization to Theme objects
+        def _to_bool_flags(val) -> ThemeFlags:
+            if isinstance(val, dict):
+                return ThemeFlags(**{**ThemeFlags().model_dump(), **val})
+            if isinstance(val, list):
+                s = set([str(x).strip().lower() for x in val])
+                return ThemeFlags(
+                    decision=("decision" in s),
+                    action=("action" in s or "actions" in s or "action items assigned" in s),
+                    question=("question" in s or "questions" in s),
+                    dependency=("dependency" in s or "dependencies" in s or "blocker" in s or "blockers" in s),
+                )
+            return ThemeFlags()
+
+        def _norm_tier(t: Optional[str]) -> str:
+            if not t:
+                return "SECONDARY"
+            s = str(t).strip().lower()
+            if "primary" in s:
+                return "PRIMARY"
+            if "secondary" in s:
+                return "SECONDARY"
+            if "tangential" in s or "tangent" in s:
+                return "TANGENTIAL"
+            return "SECONDARY"
+
+        normed: List[Theme] = []
+        for idx, it in enumerate(items, start=1):
+            try:
+                pid = int(it.get("id") or idx)
+            except Exception:
+                pid = idx
+            title = it.get("title") or it.get("name") or f"Theme {pid}"
+            summary = it.get("summary") or it.get("description") or ""
+            tp = it.get("time_percent")
+            try:
+                tpv = float(tp) if tp is not None else None
+            except Exception:
+                tpv = None
+            participants = it.get("participants") or []
+            if isinstance(participants, str):
+                participants = [p.strip() for p in participants.split(",") if p.strip()]
+            tier = _norm_tier(it.get("tier") or it.get("category"))
+            flags = _to_bool_flags(it.get("flags") or it.get("indicators") or [])
+
+            theme = Theme(
+                id=pid,
+                title=str(title)[:64],
+                summary=str(summary)[:500] if summary else f"Discussion on {title}",
+                time_percent=float(tpv) if tpv is not None else 0.0,
+                participants=[str(x) for x in participants][:10],
+                tier=tier,  # type: ignore
+                flags=flags,
+            )
+            normed.append(theme)
+
+        # If no time percents, distribute roughly
+        if normed and all(t.time_percent == 0 for t in normed):
+            even = round(100.0 / max(1, len(normed)), 2)
+            for t in normed:
+                t.time_percent = even
+
+        themes = normed
 
     # Lightweight validation: ensure 5-10 items
     if len(themes) < 5 or len(themes) > 10:
         # Minimal retry with stronger instruction; production could add more controls
         strict_prompt = MASTER_THEME_PROMPT + "\n\nSTRICT: Return between 5 and 10 themes inclusive."
         messages[0] = SystemMessage(content=strict_prompt)
-        result2 = structured.invoke(messages)
-        if isinstance(result2, ThemeList):
-            themes = result2.themes
-        else:
-            themes = [Theme(**t) for t in result2.get("themes", [])]
+        try:
+            result2 = structured.invoke(messages)
+            if isinstance(result2, ThemeList):
+                themes = result2.themes
+            else:
+                themes = [Theme(**t) for t in result2.get("themes", [])]
+        except Exception:
+            # Keep previous fallback themes if structured parse fails
+            themes = themes
 
     # Pause for human approval/corrections before proceeding to downstream steps
     if require_approval:
@@ -365,23 +499,84 @@ def expand_themes(state: MeetingState, config: Optional[RunnableConfig] = None) 
             )
         )
 
-        result = structured.invoke([sys, human])
+        # Try structured first; fall back to manual JSON parsing with normalization
+        try:
+            result = structured.invoke([sys, human])
+            if not isinstance(result, ThemeNotes):
+                result = ThemeNotes(**result)
+        except Exception:
+            # Fallback JSON instruction
+            schema_hint = (
+                "Return ONLY JSON matching this schema, no extra text.\n"
+                "{\n  \"theme_id\": 1,\n  \"title\": \"...\",\n  \"notes_md\": \"...\",\n  \"word_count\": 350,\n  \"quotes\": [{\"text\": \"...\", \"speaker\": \"Alice\"}],\n  \"related_resources\": [{\"label\": \"Doc\", \"url\": \"https://...\"}]\n}"
+            )
+            sys_f = SystemMessage(content=THEME_EXPANSION_PROMPT + "\n\nSTRICT: " + schema_hint)
+            raw = llm.invoke([sys_f, human])
+            content = getattr(raw, "content", "") if raw is not None else "{}"
+            if content.strip().startswith("```"):
+                content = "\n".join(content.strip().splitlines()[1:-1])
+            try:
+                data_f = json.loads(content)
+            except Exception:
+                data_f = {}
 
-        # Normalize to ThemeNotes instance
-        if not isinstance(result, ThemeNotes):
-            result = ThemeNotes(**result)
+            # Normalize quotes/resources if they are strings
+            q = data_f.get("quotes")
+            if isinstance(q, list):
+                qn = []
+                for item in q:
+                    if isinstance(item, dict):
+                        qn.append(item)
+                    elif isinstance(item, str):
+                        txt = item.strip().strip('"')
+                        speaker = None
+                        if " - " in txt:
+                            parts = txt.rsplit(" - ", 1)
+                            txt = parts[0].strip()
+                            speaker = parts[1].strip()
+                        qn.append({"text": txt, "speaker": speaker})
+                data_f["quotes"] = qn
+
+            rr = data_f.get("related_resources")
+            if isinstance(rr, list):
+                rrn = []
+                for r in rr:
+                    if isinstance(r, dict):
+                        rrn.append(r)
+                    elif isinstance(r, str):
+                        rrn.append({"label": r})
+                data_f["related_resources"] = rrn
+
+            # Build ThemeNotes instance
+            try:
+                result = ThemeNotes(**data_f)
+            except Exception:
+                # As last resort, create minimal valid object
+                notes_md = data_f.get("notes_md") or ""
+                result = ThemeNotes(
+                    theme_id=theme_obj.id,
+                    title=theme_obj.title,
+                    notes_md=str(notes_md)[:4000] or f"Notes for {theme_obj.title}",
+                    word_count=_count_words(notes_md) if notes_md else 320,
+                    quotes=[],
+                    related_resources=[],
+                )
 
         wc = result.word_count or _count_words(result.notes_md)
-        # Retry if out of range
+        # Retry structured once if out of range
         if wc < 300 or wc > 500:
-            sys2 = SystemMessage(
-                content=THEME_EXPANSION_PROMPT
-                + "\n\nSTRICT: Ensure notes_md stays within 300-500 words."
-            )
-            result2 = structured.invoke([sys2, human])
-            if not isinstance(result2, ThemeNotes):
-                result2 = ThemeNotes(**result2)
-            result = result2
+            try:
+                sys2 = SystemMessage(
+                    content=THEME_EXPANSION_PROMPT
+                    + "\n\nSTRICT: Ensure notes_md stays within 300-500 words."
+                )
+                result2 = structured.invoke([sys2, human])
+                if not isinstance(result2, ThemeNotes):
+                    result2 = ThemeNotes(**result2)
+                result = result2
+            except Exception:
+                # If still failing, keep existing result and adjust count
+                pass
 
         # Finalize and store as plain dict for state friendliness
         data = result.model_dump()
@@ -414,6 +609,14 @@ class ActionItem(BaseModel):
     # Be flexible in QC: accept arbitrary strings and normalize later
     priority: Optional[str] = None
     depends_on: List[str] = Field(default_factory=list)
+    # Memory tracking fields
+    action_id: Optional[str] = None  # Unique identifier for cross-meeting tracking
+    meeting_id: Optional[str] = None  # Meeting where this action was first created
+    created_date: Optional[str] = None  # ISO date when first created
+    status: Optional[str] = "pending"  # pending, in_progress, completed, blocked
+    mentions_count: int = 1  # How many meetings this has been mentioned in
+    last_mentioned: Optional[str] = None  # ISO date of last mention
+    escalation_level: int = 0  # 0=none, 1=escalated, 2=urgent
 
 
 class Decision(BaseModel):
@@ -435,6 +638,264 @@ class Outcomes(BaseModel):
     open_questions: List[OpenQuestion]
 
 
+# =====================
+# Action Item Memory Management
+# =====================
+
+class ActionItemMemory:
+    """Persistent storage for action items across meetings."""
+    
+    def __init__(self, db_path: str = "action_items.db"):
+        self.db_path = Path(db_path)
+        self._init_db()
+    
+    def _init_db(self):
+        """Initialize SQLite database for action item storage."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS action_items (
+                action_id TEXT PRIMARY KEY,
+                what TEXT NOT NULL,
+                owner TEXT,
+                due TEXT,
+                why TEXT,
+                priority TEXT,
+                depends_on TEXT,  -- JSON array
+                meeting_id TEXT,
+                created_date TEXT,
+                status TEXT DEFAULT 'pending',
+                mentions_count INTEGER DEFAULT 1,
+                last_mentioned TEXT,
+                escalation_level INTEGER DEFAULT 0,
+                history TEXT  -- JSON array of meeting mentions
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS meetings (
+                meeting_id TEXT PRIMARY KEY,
+                date TEXT,
+                attendees TEXT,  -- JSON array
+                transcript_hash TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def store_action_item(self, action_item: ActionItem, meeting_id: str, meeting_date: str) -> str:
+        """Store or update an action item with memory tracking."""
+        if not action_item.action_id:
+            action_item.action_id = f"{meeting_id}_{hash(action_item.what) % 10000}"
+        
+        # Check if this action item already exists
+        existing = self.get_action_item_by_id(action_item.action_id)
+        
+        if existing:
+            # Update existing item with new mention
+            existing.mentions_count += 1
+            existing.last_mentioned = meeting_date
+            existing.escalation_level = self._calculate_escalation(existing)
+            
+            # Update history
+            history = json.loads(existing.model_dump().get('history', '[]'))
+            history.append({
+                'meeting_id': meeting_id,
+                'date': meeting_date,
+                'status': action_item.status or existing.status
+            })
+            existing.history = json.dumps(history)
+            
+            self._update_db_item(existing)
+            return existing.action_id
+        else:
+            # Create new item
+            action_item.meeting_id = meeting_id
+            action_item.created_date = meeting_date
+            action_item.last_mentioned = meeting_date
+            action_item.history = json.dumps([{
+                'meeting_id': meeting_id,
+                'date': meeting_date,
+                'status': action_item.status or 'pending'
+            }])
+            
+            self._insert_db_item(action_item)
+            return action_item.action_id
+    
+    def get_action_item_by_id(self, action_id: str) -> Optional[ActionItem]:
+        """Retrieve an action item by ID."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM action_items WHERE action_id = ?', (action_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return self._row_to_action_item(row)
+        return None
+    
+    def get_pending_action_items(self, owner: Optional[str] = None) -> List[ActionItem]:
+        """Get all pending action items, optionally filtered by owner."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        if owner:
+            cursor.execute('''
+                SELECT * FROM action_items 
+                WHERE status IN ('pending', 'in_progress') AND owner = ?
+                ORDER BY escalation_level DESC, mentions_count DESC
+            ''', (owner,))
+        else:
+            cursor.execute('''
+                SELECT * FROM action_items 
+                WHERE status IN ('pending', 'in_progress')
+                ORDER BY escalation_level DESC, mentions_count DESC
+            ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [self._row_to_action_item(row) for row in rows]
+    
+    def get_escalated_items(self) -> List[ActionItem]:
+        """Get action items that need escalation."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM action_items 
+            WHERE escalation_level > 0 AND status IN ('pending', 'in_progress')
+            ORDER BY escalation_level DESC, mentions_count DESC
+        ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [self._row_to_action_item(row) for row in rows]
+    
+    def _calculate_escalation(self, action_item: ActionItem) -> int:
+        """Calculate escalation level based on mentions and age."""
+        escalation = 0
+        
+        # Escalate based on number of mentions
+        if action_item.mentions_count >= 3:
+            escalation = 2  # Urgent
+        elif action_item.mentions_count >= 2:
+            escalation = 1  # Escalated
+        
+        # Escalate based on overdue status
+        if action_item.due and action_item.due != "TBD":
+            try:
+                # Simple date parsing for common formats
+                due_date = self._parse_date(action_item.due)
+                if due_date and due_date < datetime.now().date():
+                    escalation = max(escalation, 2)  # Urgent if overdue
+            except:
+                pass  # Ignore date parsing errors
+        
+        return escalation
+    
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """Parse various date formats."""
+        if not date_str or date_str == "TBD":
+            return None
+        
+        # Try common formats
+        formats = ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"]
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+        return None
+    
+    def _row_to_action_item(self, row) -> ActionItem:
+        """Convert database row to ActionItem."""
+        depends_on = json.loads(row[6]) if row[6] else []
+        history = row[13] if row[13] else '[]'
+        
+        return ActionItem(
+            what=row[1],
+            owner=row[2],
+            due=row[3],
+            why=row[4],
+            priority=row[5],
+            depends_on=depends_on,
+            action_id=row[0],
+            meeting_id=row[7],
+            created_date=row[8],
+            status=row[9],
+            mentions_count=row[10],
+            last_mentioned=row[11],
+            escalation_level=row[12]
+        )
+    
+    def _insert_db_item(self, action_item: ActionItem):
+        """Insert new action item into database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO action_items 
+            (action_id, what, owner, due, why, priority, depends_on, meeting_id, 
+             created_date, status, mentions_count, last_mentioned, escalation_level, history)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            action_item.action_id,
+            action_item.what,
+            action_item.owner,
+            action_item.due,
+            action_item.why,
+            action_item.priority,
+            json.dumps(action_item.depends_on),
+            action_item.meeting_id,
+            action_item.created_date,
+            action_item.status,
+            action_item.mentions_count,
+            action_item.last_mentioned,
+            action_item.escalation_level,
+            action_item.history
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def _update_db_item(self, action_item: ActionItem):
+        """Update existing action item in database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE action_items 
+            SET what=?, owner=?, due=?, why=?, priority=?, depends_on=?, 
+                status=?, mentions_count=?, last_mentioned=?, escalation_level=?, history=?
+            WHERE action_id=?
+        ''', (
+            action_item.what,
+            action_item.owner,
+            action_item.due,
+            action_item.why,
+            action_item.priority,
+            json.dumps(action_item.depends_on),
+            action_item.status,
+            action_item.mentions_count,
+            action_item.last_mentioned,
+            action_item.escalation_level,
+            action_item.history,
+            action_item.action_id
+        ))
+        
+        conn.commit()
+        conn.close()
+
+
+# Global memory instance
+action_memory = ActionItemMemory()
+
+
 ACTION_EXTRACTION_PROMPT = (
     "You are a project management specialist extracting actionable outcomes from a meeting.\n\n"
     "Analyze the transcript and expanded notes to identify:\n"
@@ -442,6 +903,11 @@ ACTION_EXTRACTION_PROMPT = (
     "2) IMPLICIT ACTION ITEMS (convert questions and problems into tasks)\n"
     "3) DECISIONS MADE (statement, rationale, dissent, impact)\n"
     "4) OPEN QUESTIONS (question, context, suggested owner)\n\n"
+    "MEMORY CONTEXT: You have access to previous action items and escalated items from past meetings.\n"
+    "When extracting new action items, consider:\n"
+    "- Are any of these items similar to previously discussed items?\n"
+    "- Should you flag recurring items for escalation?\n"
+    "- Are there dependencies on incomplete previous work?\n\n"
     "Targets: 5-15 action items, 3-8 decisions, 2-5 open questions.\n"
     "Be comprehensive and prefer inclusion over omission. Use the provided structured schema."
 )
@@ -470,11 +936,89 @@ def _canonicalize_owner(name: Optional[str], attendees: Optional[List[str]]) -> 
     return name
 
 
+def load_memory_context(state: MeetingState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+    """Load previous action items and generate memory insights."""
+    meeting_id = state.get("meeting_id", "default_meeting")
+    meeting_date = state.get("meeting_date", datetime.now().strftime("%Y-%m-%d"))
+    metadata = state.get("metadata", {}) or {}
+    attendees = metadata.get("attendees") if isinstance(metadata, dict) else []
+    
+    # Get previous action items for all attendees
+    previous_items = []
+    escalated_items = []
+    
+    if attendees:
+        for attendee in attendees:
+            attendee_items = action_memory.get_pending_action_items(attendee)
+            previous_items.extend([item.model_dump() for item in attendee_items])
+    
+    # Also get all escalated items
+    escalated = action_memory.get_escalated_items()
+    escalated_items = [item.model_dump() for item in escalated]
+    
+    # Generate memory insights using LLM
+    memory_insights = []
+    if previous_items or escalated_items:
+        temperature = 0.3
+        if config and isinstance(config, dict):
+            cfg = config.get("configurable", {}) or {}
+            temperature = float(cfg.get("temperature", temperature))
+            model = cfg.get("model")
+            provider = cfg.get("provider")
+        
+        llm = _get_llm(temperature=temperature, model=model, provider=provider)
+        
+        insight_prompt = (
+            "You are analyzing action items from previous meetings to provide insights for the current meeting.\n\n"
+            "Generate 2-4 concise insights about:\n"
+            "1. Recurring action items that have been mentioned multiple times\n"
+            "2. Items that may be overdue or need escalation\n"
+            "3. Dependencies or blockers that could affect current work\n"
+            "4. Patterns in incomplete work that suggest systemic issues\n\n"
+            "Format each insight as a single sentence starting with '•'"
+        )
+        
+        items_text = ""
+        if previous_items:
+            items_text += "Previous Action Items:\n"
+            for item in previous_items[:10]:  # Limit to avoid token limits
+                items_text += f"- {item['what']} (Owner: {item['owner']}, Mentions: {item['mentions_count']}, Status: {item['status']})\n"
+        
+        if escalated_items:
+            items_text += "\nEscalated Items:\n"
+            for item in escalated_items:
+                items_text += f"- {item['what']} (Owner: {item['owner']}, Escalation: {item['escalation_level']})\n"
+        
+        if items_text:
+            messages = [
+                SystemMessage(content=insight_prompt),
+                HumanMessage(content=items_text)
+            ]
+            
+            response = llm.invoke(messages)
+            if response and hasattr(response, 'content'):
+                insights = [line.strip() for line in response.content.split('\n') if line.strip().startswith('•')]
+                memory_insights = insights[:4]  # Limit to 4 insights
+    
+    return {
+        "previous_action_items": previous_items,
+        "escalated_items": escalated_items,
+        "memory_insights": memory_insights
+    }
+
+
 def extract_outcomes(state: MeetingState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     transcript = state.get("transcript", "")
     theme_notes = state.get("theme_notes", {}) or {}
     metadata = state.get("metadata", {}) or {}
     attendees = metadata.get("attendees") if isinstance(metadata, dict) else None
+    meeting_id = state.get("meeting_id", "default_meeting")
+    meeting_date = state.get("meeting_date", datetime.now().strftime("%Y-%m-%d"))
+    
+    # Get memory context
+    previous_items = state.get("previous_action_items", [])
+    escalated_items = state.get("escalated_items", [])
+    memory_insights = state.get("memory_insights", [])
 
     temperature = 0.2
     require_approval = True
@@ -493,19 +1037,103 @@ def extract_outcomes(state: MeetingState, config: Optional[RunnableConfig] = Non
     structured = llm.with_structured_output(Outcomes)
 
     compiled_md = _compile_theme_notes_md(theme_notes)
+    
+    # Build memory context for the prompt
+    memory_context = ""
+    if memory_insights:
+        memory_context += "MEMORY INSIGHTS:\n" + "\n".join(memory_insights) + "\n\n"
+    
+    if previous_items:
+        memory_context += "PREVIOUS ACTION ITEMS (for context):\n"
+        for item in previous_items[:5]:  # Limit to avoid token limits
+            memory_context += f"- {item['what']} (Owner: {item['owner']}, Mentions: {item['mentions_count']})\n"
+        memory_context += "\n"
+    
+    if escalated_items:
+        memory_context += "ESCALATED ITEMS (need attention):\n"
+        for item in escalated_items:
+            memory_context += f"- {item['what']} (Owner: {item['owner']}, Escalation Level: {item['escalation_level']})\n"
+        memory_context += "\n"
 
     sys = SystemMessage(content=ACTION_EXTRACTION_PROMPT)
     human = HumanMessage(
         content=(
+            memory_context +
             "Use both the original transcript and the expanded theme notes.\n\n"
             "Transcript (verbatim):\n" + transcript + "\n\n"
             "Expanded Theme Notes (markdown):\n" + compiled_md
         )
     )
 
-    result = structured.invoke([sys, human])
-    if not isinstance(result, Outcomes):
-        result = Outcomes(**result)
+    # Try structured; fall back to manual JSON parsing
+    try:
+        result = structured.invoke([sys, human])
+        if not isinstance(result, Outcomes):
+            result = Outcomes(**result)
+    except Exception:
+        schema_hint = (
+            "Return ONLY JSON with keys: actions, decisions, open_questions.\n"
+            "Each action: {what, owner, due, why, priority, depends_on[]}\n"
+            "Each decision: {statement, rationale, dissent, impact}\n"
+            "Each open_question: {question, context, suggested_owner}"
+        )
+        sys_f = SystemMessage(content=ACTION_EXTRACTION_PROMPT + "\n\nSTRICT: " + schema_hint)
+        raw = llm.invoke([sys_f, human])
+        text = getattr(raw, "content", "") if raw is not None else "{}"
+        if text.strip().startswith("```"):
+            text = "\n".join(text.strip().splitlines()[1:-1])
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = {"actions": [], "decisions": [], "open_questions": []}
+
+        def _norm_action(a: Any) -> ActionItem:
+            if isinstance(a, ActionItem):
+                return a
+            if not isinstance(a, dict):
+                a = {}
+            deps = a.get("depends_on")
+            if isinstance(deps, str):
+                deps = [x.strip() for x in deps.split(",") if x.strip()]
+            elif not isinstance(deps, list):
+                deps = []
+            return ActionItem(
+                what=str(a.get("what", "")).strip() or "Unspecified action",
+                owner=a.get("owner"),
+                due=str(a.get("due")) if a.get("due") is not None else None,
+                why=a.get("why"),
+                priority=a.get("priority"),
+                depends_on=[str(x) for x in deps],
+            )
+
+        def _norm_decision(d: Any) -> Decision:
+            if isinstance(d, Decision):
+                return d
+            if not isinstance(d, dict):
+                d = {"statement": str(d)}
+            return Decision(
+                statement=str(d.get("statement", "")).strip() or "Decision recorded",
+                rationale=d.get("rationale"),
+                dissent=d.get("dissent"),
+                impact=d.get("impact"),
+            )
+
+        def _norm_q(q: Any) -> OpenQuestion:
+            if isinstance(q, OpenQuestion):
+                return q
+            if not isinstance(q, dict):
+                q = {"question": str(q)}
+            return OpenQuestion(
+                question=str(q.get("question", "")).strip() or "Unspecified question",
+                context=q.get("context"),
+                suggested_owner=q.get("suggested_owner"),
+            )
+
+        result = Outcomes(
+            actions=[_norm_action(x) for x in data.get("actions", [])],
+            decisions=[_norm_decision(x) for x in data.get("decisions", [])],
+            open_questions=[_norm_q(x) for x in data.get("open_questions", [])],
+        )
 
     # Validate counts; retry with stricter instruction if below targets
     if (
@@ -513,18 +1141,40 @@ def extract_outcomes(state: MeetingState, config: Optional[RunnableConfig] = Non
         or len(result.decisions) < min_decisions
         or len(result.open_questions) < min_questions
     ):
-        sys2 = SystemMessage(
-            content=(
-                ACTION_EXTRACTION_PROMPT
-                + "\n\nSTRICT: Ensure at least the minimum counts. "
-                + f"Actions>={min_actions}, Decisions>={min_decisions}, OpenQuestions>={min_questions}. "
-                + "Include implicit items where necessary."
+        try:
+            sys2 = SystemMessage(
+                content=(
+                    ACTION_EXTRACTION_PROMPT
+                    + "\n\nSTRICT: Ensure at least the minimum counts. "
+                    + f"Actions>={min_actions}, Decisions>={min_decisions}, OpenQuestions>={min_questions}. "
+                    + "Include implicit items where necessary."
+                )
             )
-        )
-        result2 = structured.invoke([sys2, human])
-        if not isinstance(result2, Outcomes):
-            result2 = Outcomes(**result2)
-        result = result2
+            result2 = structured.invoke([sys2, human])
+            if not isinstance(result2, Outcomes):
+                result2 = Outcomes(**result2)
+            result = result2
+        except Exception:
+            # Non-structured fallback to hit minimum counts
+            ask = (
+                "Return ONLY JSON with keys actions, decisions, open_questions. "
+                f"Ensure counts >= {min_actions}, {min_decisions}, {min_questions} respectively."
+            )
+            raw = llm.invoke([SystemMessage(content=ACTION_EXTRACTION_PROMPT + "\n\nSTRICT: " + ask), human])
+            text = getattr(raw, "content", "") if raw is not None else "{}"
+            if text.strip().startswith("```"):
+                text = "\n".join(text.strip().splitlines()[1:-1])
+            try:
+                data = json.loads(text)
+            except Exception:
+                data = {}
+            # Merge non-empty lists
+            if data.get("actions"):
+                result.actions = [ActionItem(**a) if not isinstance(a, ActionItem) else a for a in data.get("actions", [])]
+            if data.get("decisions"):
+                result.decisions = [Decision(**d) if not isinstance(d, Decision) else d for d in data.get("decisions", [])]
+            if data.get("open_questions"):
+                result.open_questions = [OpenQuestion(**q) if not isinstance(q, OpenQuestion) else q for q in data.get("open_questions", [])]
 
     # Normalize owners with attendee list if provided
     actions: List[ActionItem] = []
@@ -533,6 +1183,105 @@ def extract_outcomes(state: MeetingState, config: Optional[RunnableConfig] = Non
             a = ActionItem(**a)
         a.owner = _canonicalize_owner(a.owner, attendees)
         actions.append(a)
+
+    # ---------- Matching to existing memory before storing ----------
+    class ActionMapping(BaseModel):
+        new_index: int
+        link_action_id: Optional[str] = None  # existing action_id if match, else null
+        reason: Optional[str] = None
+        normalized_status: Optional[str] = None  # pending, in_progress, completed, blocked
+        normalized_priority: Optional[str] = None  # IMMEDIATE/SHORT_TERM/LONG_TERM
+
+    class ActionMappingList(BaseModel):
+        mappings: List[ActionMapping]
+
+    # Build candidate set from memory (pending/in_progress only)
+    candidates = [a for a in action_memory.get_pending_action_items(None)]
+    cand_payload = [
+        {
+            "action_id": c.action_id,
+            "what": c.what,
+            "owner": c.owner,
+            "due": c.due,
+            "status": c.status,
+            "mentions_count": c.mentions_count,
+            "escalation_level": c.escalation_level,
+        }
+        for c in candidates[:40]
+    ]
+
+    # Quick exact-match pre-link (owner-insensitive, text-equal)
+    index_to_link: Dict[int, str] = {}
+    norm = lambda s: (s or "").strip().lower()
+    for idx, a in enumerate(actions):
+        what = norm(a.what)
+        owner = norm(a.owner)
+        for c in candidates:
+            if norm(c.what) == what and (not owner or norm(c.owner) == owner):
+                index_to_link[idx] = c.action_id
+                break
+
+    # LLM-assisted linking for the rest
+    remaining = [
+        {"index": i, "what": a.what, "owner": a.owner, "due": a.due, "priority": a.priority}
+        for i, a in enumerate(actions)
+        if i not in index_to_link
+    ]
+
+    if remaining and cand_payload:
+        temperature2 = 0.1
+        model2 = provider2 = None
+        if config and isinstance(config, dict):
+            cfg = config.get("configurable", {}) or {}
+            temperature2 = float(cfg.get("temperature", temperature2))
+            model2 = cfg.get("model")
+            provider2 = cfg.get("provider")
+        llm2 = _get_llm(temperature=temperature2, model=model2, provider=provider2)
+
+        sys2 = SystemMessage(
+            content=(
+                "You link newly extracted action items to an existing action ledger.\n"
+                "For each new item, either return link_action_id of the matching existing item or null if new.\n"
+                "Match semantically similar items (e.g., 'auth bug' ~ 'login problem'), using owner/due as tie-breakers.\n"
+                "Normalize status to: pending, in_progress, completed, blocked.\n"
+                "Normalize priority to: IMMEDIATE, SHORT_TERM, LONG_TERM when possible."
+            )
+        )
+        human2 = HumanMessage(
+            content=(
+                "Existing (candidates):\n"
+                + json.dumps(cand_payload, ensure_ascii=False)
+                + "\n\nNew (to link):\n"
+                + json.dumps(remaining, ensure_ascii=False)
+            )
+        )
+        mappings_obj = llm2.with_structured_output(ActionMappingList).invoke([sys2, human2])
+        if not isinstance(mappings_obj, ActionMappingList):
+            mappings_obj = ActionMappingList(**mappings_obj)
+        for m in mappings_obj.mappings:
+            if m.link_action_id is not None:
+                index_to_link[m.new_index] = m.link_action_id
+                # Apply normalized hints back into action
+                if 0 <= m.new_index < len(actions):
+                    if m.normalized_status:
+                        actions[m.new_index].status = m.normalized_status
+                    if m.normalized_priority:
+                        actions[m.new_index].priority = m.normalized_priority
+
+    # Store action items in memory for cross-meeting tracking
+    stored_actions = []
+    for idx, action in enumerate(actions):
+        try:
+            # If linked, use existing action_id
+            if idx in index_to_link:
+                action.action_id = index_to_link[idx]
+            action_id = action_memory.store_action_item(action, meeting_id, meeting_date)
+            action.action_id = action_id
+            stored_actions.append(action.model_dump())
+        except Exception as e:
+            # Fallback: store without memory if there's an error
+            print(f"Warning: Could not store action item in memory: {e}")
+            stored_actions.append(action.model_dump())
 
     # Optional approval interrupt before finalizing
     if require_approval:
@@ -543,14 +1292,17 @@ def extract_outcomes(state: MeetingState, config: Optional[RunnableConfig] = Non
 
     # Return as simple dicts for state
     return {
-        "actions": [x.model_dump() for x in actions],
+        "actions": stored_actions,
         "decisions": [d.model_dump() if isinstance(d, BaseModel) else d for d in result.decisions],
         "open_questions": [q.model_dump() if isinstance(q, BaseModel) else q for q in result.open_questions],
     }
 
 
+graph_builder.add_node("load_memory", load_memory_context)
 graph_builder.add_node("actions_decisions", extract_outcomes)
-graph_builder.add_edge("expand_themes", "actions_decisions")
+
+graph_builder.add_edge("expand_themes", "load_memory")
+graph_builder.add_edge("load_memory", "actions_decisions")
 
 # =============================
 # Step 4: Quality Control (QC)
@@ -699,9 +1451,24 @@ def qc_enhance(state: MeetingState, config: Optional[RunnableConfig] = None) -> 
         )
     )
 
-    result = structured.invoke([sys, human])
-    if not isinstance(result, QCResult):
-        result = QCResult(**result)
+    # Try structured; fall back to pass-through corrections
+    try:
+        result = structured.invoke([sys, human])
+        if not isinstance(result, QCResult):
+            result = QCResult(**result)
+    except Exception:
+        result = QCResult(
+            corrections=QCOutput(
+                themes=[t if isinstance(t, Theme) else Theme(**t) for t in themes_in],
+                theme_notes=[ThemeNotes(**v) if not isinstance(v, ThemeNotes) else v for _, v in (theme_notes_in or {}).items()],
+                actions=[ActionItem(**a) if not isinstance(a, ActionItem) else a for a in actions_in],
+                decisions=[Decision(**d) if not isinstance(d, Decision) else d for d in decisions_in],
+                open_questions=[OpenQuestion(**q) if not isinstance(q, OpenQuestion) else q for q in open_q_in],
+                resources=_gather_resources_from_notes(theme_notes_in),
+                metadata=metadata_in if isinstance(metadata_in, dict) else None,
+            ),
+            findings=[],
+        )
 
     # Convert theme_notes list back into mapping by theme_id
     notes_map: Dict[int, Dict[str, Any]] = {}
@@ -794,6 +1561,7 @@ class FinalAppendices(BaseModel):
     decision_log_md: str
     open_questions_md: str
     resources_md: str
+    memory_insights_md: str
 
 
 class FinalFooter(BaseModel):
@@ -889,6 +1657,16 @@ def _mk_resources_md(resources: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _mk_memory_insights_md(memory_insights: List[str]) -> str:
+    lines = ["## Memory Insights\n"]
+    if memory_insights:
+        for insight in memory_insights:
+            lines.append(f"- {insight}")
+    else:
+        lines.append("- No previous meeting context available")
+    return "\n".join(lines)
+
+
 def final_compile(state: MeetingState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     transcript = state.get("transcript", "")
     themes = state.get("themes", []) or []
@@ -917,22 +1695,43 @@ def final_compile(state: MeetingState, config: Optional[RunnableConfig] = None) 
     decisions_md = _mk_decision_log_md(decisions)
     questions_md = _mk_open_questions_md(open_q)
     resources_md = _mk_resources_md(resources)
+    memory_insights = state.get("memory_insights", [])
+    memory_insights_md = _mk_memory_insights_md(memory_insights)
 
     # 1) Executive summary
     es_struct = llm.with_structured_output(ExecSummary)
     es_sys = SystemMessage(content=FINAL_COMPILATION_PROMPT)
+    # Include memory insights in executive summary
+    memory_insights = state.get("memory_insights", [])
+    insights_text = ""
+    if memory_insights:
+        insights_text = "\nMemory Insights:\n" + "\n".join(memory_insights) + "\n\n"
+    
     es_human = HumanMessage(
         content=(
             "Craft an executive summary (<=150 words).\n\n"
             "Metadata: " + str(metadata) + "\n\n"
+            + insights_text +
             "Decisions: \n" + "\n".join([d["statement"] if isinstance(d, dict) else d.statement for d in decisions]) + "\n\n"
             "Top Actions: \n" + "\n".join([a["what"] if isinstance(a, dict) else a.what for a in actions[:5]]) + "\n\n"
             "Transcript signal (context only):\n" + transcript[:4000]
         )
     )
-    es = es_struct.invoke([es_sys, es_human])
-    if not isinstance(es, ExecSummary):
-        es = ExecSummary(**es)
+    try:
+        es = es_struct.invoke([es_sys, es_human])
+        if not isinstance(es, ExecSummary):
+            es = ExecSummary(**es)
+    except Exception:
+        # Fallback: assemble a concise summary
+        md = metadata
+        top_actions = ", ".join([(a["what"] if isinstance(a, dict) else a.what) for a in actions[:3]])
+        decisions_txt = "; ".join([(d["statement"] if isinstance(d, dict) else d.statement) for d in decisions[:3]])
+        text = (
+            f"Meeting summary for {md.get('title','this meeting')}. "
+            f"Key decisions: {decisions_txt}. "
+            f"Top actions: {top_actions}."
+        )
+        es = ExecSummary(text=text, word_count=_count_words(text))
     # Normalize/count words
     es_wc = _count_words(es.text)
     es = ExecSummary(text=es.text, word_count=es_wc)
@@ -954,9 +1753,12 @@ def final_compile(state: MeetingState, config: Optional[RunnableConfig] = None) 
             "Ensure readability; preserve exact quotes and technical details."
         )
     )
-    body = body_struct.invoke([body_sys, body_human])
-    if not isinstance(body, FinalBody):
-        body = FinalBody(**body)
+    try:
+        body = body_struct.invoke([body_sys, body_human])
+        if not isinstance(body, FinalBody):
+            body = FinalBody(**body)
+    except Exception:
+        body = FinalBody(detailed_notes_md=ordered_notes_md, word_count=_count_words(ordered_notes_md))
     # Normalize word count
     body = FinalBody(detailed_notes_md=body.detailed_notes_md, word_count=_count_words(body.detailed_notes_md))
 
@@ -975,6 +1777,7 @@ def final_compile(state: MeetingState, config: Optional[RunnableConfig] = None) 
             decision_log_md=decisions_md,
             open_questions_md=questions_md,
             resources_md=resources_md,
+            memory_insights_md=memory_insights_md,
         ),
         footer=footer,
         total_word_count=total_wc,
@@ -992,4 +1795,6 @@ graph_builder.add_node("final_compile", final_compile)
 graph_builder.add_edge("qc_enhance", "final_compile")
 graph_builder.add_edge("final_compile", END)
 
-app = graph_builder.compile()
+# Compile with memory checkpointer for session persistence
+checkpointer = MemorySaver()
+app = graph_builder.compile(checkpointer=checkpointer)

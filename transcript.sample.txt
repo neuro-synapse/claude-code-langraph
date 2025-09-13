@@ -1,13 +1,70 @@
-[00:00] Alice: Welcome everyone. Goal today is to lock the Q4 scope and timelines.
-[00:02] Bob: We have two options for scope: MVP by October 15, or a broader feature set that would slip into November.
-[00:05] Carol: Data team dependency: the Analytics API needs a minor version bump; SLA is currently 99.9% uptime.
-[00:08] Dave: CI is flaky; we had three pipeline failures last week. We may need to upgrade test runners and increase parallelism.
-[00:12] Bob: Proposal: ship the MVP v1 on October 15, then iterate on feature flags.
-[00:14] Alice: Agreed. Let’s capture action items and owners.
-[00:15] Carol: I’ll confirm the Analytics API schedule and any breaking changes.
-[00:17] Dave: I’ll draft a CI upgrade plan and estimate risk reduction.
-[00:20] Alice: Bob, please draft the MVP scope and rollout plan; we’ll review on Thursday.
-[00:22] Bob: Yes, I’ll share a PRD and a project plan in Drive.
-[00:25] Alice: Any open questions? Timing for customer pilot? Also, which metrics are must-have for v1?
-[00:28] Carol: Pilot timing depends on API readiness. Metrics: DAU, conversion rate, and error rate.
-[00:30] Alice: Great. Let’s close here and follow up on the action items.
+
+Transcript
+September 4, 2025, 5:59PM
+Witkowski, Lynn (VDOT Contractor)   0:21Hey, Alicia.
+Laboy, Alecia (VDOT Contractor)   0:22Hey, Lynn, how's it going?
+Witkowski, Lynn (VDOT Contractor)   0:25It's going.How about you?
+Laboy, Alecia (VDOT Contractor)   0:26Yeah.Not too bad.It's nice and hot out today compared to last few days and I'm like, I can't.I want to work outside, but then The Jets keep flying over and I'm like I'm not working outside.You're having this meeting today, right?
+Witkowski, Lynn (VDOT Contractor)   1:30What meeting?
+Laboy, Alecia (VDOT Contractor)   1:32The pattern meaning.
+Witkowski, Lynn (VDOT Contractor)   1:37Oh.
+Laboy, Alecia (VDOT Contractor)   1:39OK.There's somebody else.Hey, Jonathan.
+Witkowski, Lynn (VDOT Contractor)   1:43Yeah, I was like, well, maybe everyone's coming from another meeting, I'm sure.
+Laboy, Alecia (VDOT Contractor)   1:47Oh, I'm sure it's Thursdays for some reason are, like, Chaos meeting day.
+Brain, Jonathan (VDOT Contractor)   1:54Yeah, this afternoon.Back-to-back to back-to-back.
+Boma, Herman (VDOT Contractor)   2:27Hey.See.It's all I think I'll just hold on for like 5 minutes and see who joins before we begin.OK.I I think we let's let's begin.I think it's 5 past.I'm not sure if we'll have more people join, but I think we'll begin.Let me share my screen.Are you guys able to see my screen?
+Witkowski, Lynn (VDOT Contractor)   6:09Yes.
+Boma, Herman (VDOT Contractor)   6:10Yeah. So that's the only two items I have for the agenda, right.So we might.I might finish early and get people back.Time to work on their patterns. Or so the first thing I just want to does anybody have any pattern to review to be or any questions that they need feedback on?Any confusion about their pattern they're working on and they need more direction.That's the first thing I just wanted to check with everybody. If there's something to.Review today I'd like to make sure we are able to get to it.Or if there's any feedback anybody needs on what they're working on.I think we can use this time to to look.To look into that, right?So any, any, any.Any person who has anything to review today or anything they wanted to go through, anything like that?All right. So I assume that there there are no patterns to review. OK, then the only thing I'll do is that I want to just check with people where they are with the status of their patterns, right.I think it's like, I think that is just something we'll do each time we come here. Just so we make sure that you know, progress is happening right that people are actually making progress on their patterns and yeah, and and and they have no issues, right just to.So I would just want to check in and also.I for some of these patterns, I'm not sure.Because we have to track the dates in which they were assigned, right?So I'm not.I don't think I have some dates since some people had to assign their patterns to themselves later on, right?So that is something that it might be useful for me to also capture, just to see how, because we have to track, right?We have a month, roughly a month or less than that to work on these patterns, right?So it's important to kind of keep track of when, when that is happening. So I'll bring up the spreadsheet I just downloaded it and I'll just go through.One you know, just go through everybody.I mean, who is in the call hopefully.Then EA and I'll just filter by.Maybe I'll just start with.Jonathan. OK.And.
+Brain, Jonathan (VDOT Contractor)   8:40Yeah. So I had a meeting, we got some wrenches thrown in, so I've needed some escalations and have reached out to Billy and Alex for some clarity on how we want to transform things.There's a meeting scheduled for Monday to determine that, and it might have a somewhat material impact on the pattern.
+Boma, Herman (VDOT Contractor)   8:59All right, so which?Which you the one.Is it the one you were working on last time?Right, I think you reviewed, is it?
+Brain, Jonathan (VDOT Contractor)   9:03Mm-hmm.
+Boma, Herman (VDOT Contractor)   9:04I think it was the which one was it?I think is it one of the is it here?Am I missing something here?
+Brain, Jonathan (VDOT Contractor)   9:12Exposing database for Tier 1 apps is already. These are all three of those are done.
+Boma, Herman (VDOT Contractor)   9:17OK, these ones are done OK.All right.
+Brain, Jonathan (VDOT Contractor)   9:18Yes, they're already published.
+Boma, Herman (VDOT Contractor)   9:20So. So which one do you have currently? Now, let me just bring this up again, sorry.
+Brain, Jonathan (VDOT Contractor)   9:24It's pattern four O 6.I think it was previously like pattern 170 or something like that, but we replaced it for 4/06.
+Boma, Herman (VDOT Contractor)   9:32OK.Yes, all items removed.
+Brain, Jonathan (VDOT Contractor)   9:38It is about.Dataverse and power BI.We reviewed it last time, but then I met with the SME and then we've recently had some challenging issues come up with a specific use case.And it's going to lead. The pattern itself is going to stay, but the applicability is going to change and we may need to expand it.In specific use cases.
+Boma, Herman (VDOT Contractor)   10:06OK.All right, all right.So that's. Yeah, that's all. I just wanted to see where you are with that one. OK, so.Let me see the next person I think is Alicia.What's the status of yours?I think it's this one right 173.
+Laboy, Alecia (VDOT Contractor)   10:26Yes. So 173 is just currently working through those.I don't have any major updates.It's low on my list right now because there's no approved technology from Vida yet.
+Boma, Herman (VDOT Contractor)   10:41OK.
+Laboy, Alecia (VDOT Contractor)   10:41So we're trying to at least outline what we can and can't use so.
+Boma, Herman (VDOT Contractor)   10:48All right.And then Kit, I think let me see which one you have currently.
+Goldenberg, Kate (VDOT Contractor)   10:55We have the one that is the future state.It's a future state process and we have number of future state processes.Plus some EDA patterns.They all in works in discussions, so nothing finalized, nothing to present.
+Boma, Herman (VDOT Contractor)   11:14OK.But when when?When do you think you will have something right? Because you remember we have a month to complete this right?So do you think that that will be done in in the next two weeks or so?
+Goldenberg, Kate (VDOT Contractor)   11:22I know but.I am.I've completed it, but I think it's a piece of the future state process and we can't really publish it.I'm working on another one that is not so tightly coupled with future state and that one will be complete in two weeks and it's not there. Not registered here.
+Boma, Herman (VDOT Contractor)   11:47It's not on the on the list.
+Goldenberg, Kate (VDOT Contractor)   11:50No, it's not.
+Boma, Herman (VDOT Contractor)   11:52OK.So do you want to add that one so we can track it?
+Goldenberg, Kate (VDOT Contractor)   11:57I will as soon as we have a name for it.
+Boma, Herman (VDOT Contractor)   12:00All right, please.Because again, we need to track, right?I mean so because I mean in the next two weeks or so, we have to wrap them up.So we need to know what you know.Yeah, what?What is happening?So yeah, and if if this one right, you said the one, the other one is a future state which which means that you know either, I mean you can still review it with a group if you want, right?And then we can just have it like in the holding state, right?And we don't necessarily need to publish it now, but.Yeah, yeah.So you can have it in the state, but I think.Maybe in the future, maybe we don't work on something that we think that cannot be published, right?We need to choose something that we know can be published, right?That we can have it published if it's something that is too far off. Right, then there's no point, right?Because what's the point working on that right now?So I think one thing I'll suggest is that we, you know, either you share it with a group and we just leave it like that.That has been worked on, but you know it's a future state thing.We might visit it back later, right?And then you focus on the one that you know, it's probably doing the.Weeks, right. And let's get that, Emma on the board.So we can track it.
+Goldenberg, Kate (VDOT Contractor)   13:06Sounds good.
+Boma, Herman (VDOT Contractor)   13:08Alright. And then.Who else?Is let me see who else is on the call.I'm not sure.Sindhuja do you let me?I think you have something.
+Sane, Sindhuja (VDOT Contractor)   13:22Yeah, I have logging and monitoring.Assigned to me at Herman.I think what I need to assign it to myself.I guess I updated you that I would update here in the list, but I did not.
+Boma, Herman (VDOT Contractor)   13:36OK.So yeah, OK.Yeah, because I yeah, I don't.Yeah, I think.Yeah, you have that right.Please update that right? I'm.
+Sane, Sindhuja (VDOT Contractor)   13:41Yeah, sure.And you know, coming to the status I just started working on it.It's like, you know, we don't have anything in place as of now. So I think it might takes some time you know.Arman, I'm trying to understand what we have currently in place at.
+Boma, Herman (VDOT Contractor)   13:58So.I OK, so I think you know and and this is this is something I think is important, right.I think that you know when we have patents because again there's a few just people, right.I think that there's a future state in terms of what monitoring is going to look like, right? With all the migration going to the cloud, right?
+Sane, Sindhuja (VDOT Contractor)   14:17OK. Yep.
+Boma, Herman (VDOT Contractor)   14:18So that's one aspect of it.I don't if we should spend much time on that if we don't have the details right, but there's also a current state right off.How are we doing logging?Right. Because I know you have monitoring and logging, right?So I think it's important to understand like how we log in things to do things like that, right.
+Sane, Sindhuja (VDOT Contractor)   14:31Alright.
+Boma, Herman (VDOT Contractor)   14:35But yeah, and I think again when you have questions or concerns or you're not sure exactly what to focus right, this is probably the right time to raise those, right.So, you know, I think if Billy's here or I am here, any other person where we can provide, you know, even I think you know they can provide more guidance in terms of what what we should be looking for right that that's that's why I asked those.Questions like does anybody have any concerns about their patterns, right.They are not sure because I know sometimes the patterns are not very clear right.So we should do it.
+Sane, Sindhuja (VDOT Contractor)   15:04Yeah.
+Boma, Herman (VDOT Contractor)   15:05Because again, I'm I'm trying.You know, I'm trying to get things within this one month timeline right, making sure that we are able to get these patterns done within the month and in order to be able to do that, we, I know that it's important that people understand exactly what they are, what.That pattern should look like right? If they don't have clarity, then it might take a while.
+Sane, Sindhuja (VDOT Contractor)   15:20Mm-hmm.Yep, and you've provided me some inputs on this like way to start with. So I started working on those lines.Let's say like.Yeah, how it goes.
+Boma, Herman (VDOT Contractor)   15:35All right. OK.Yeah. I mean as long.Yeah, we should also make some progress on it. And if they again, any questions, please be free to bring it up during this session.
+Sane, Sindhuja (VDOT Contractor)   15:43Yeah, sure.Yeah. OK.
+Boma, Herman (VDOT Contractor)   15:47I think I mean, I think that's everybody on Elizabeth.I mean, yeah, sorry I missed Elizabeth.I'm looking here.
+Campbell, Elizabeth (VDOT Contractor)   15:55I'm always overlooked.Whoa, it's me.I'm working right now on the Quick Mart datamart light.There is a lot of redundancy and I'm working to there.
+Boma, Herman (VDOT Contractor)   16:07OK then.
+Campbell, Elizabeth (VDOT Contractor)   16:133 copies.Different versions think it's all the same thing, working to combine them and then I think we need to have a discussion.I think datamarts are kind of going by the wayside in the future, so I think we need to have that discussion. But that'll mean maybe next week we can do that.
+Boma, Herman (VDOT Contractor)   16:36OK.All right, perfect.All right, all right.So I'll just that that's fine. I think we are good on that.So yeah, and I think that Elizabeth is the last person we have, right, I think.Lynn, do you know Emma? If Marie I know. Is she still out on vacation? I'm not sure.
+Witkowski, Lynn (VDOT Contractor)   16:53Yeah, she's out still.
+Boma, Herman (VDOT Contractor)   16:55Oh, OK.Alright, OK. OK.So I don't think we should worry about that, OK.So I think that's all I have for today.I mean, if if we don't, if there's not nothing to discuss, right?If nobody has any issues or anything with their patents right then, I think we can close early and give people back some time.I will try to wrap up the meet meeting notes and send out so people were not here.We'll see what we talked about.All right.
+Laboy, Alecia (VDOT Contractor)   17:21Thank you very much.
+Boma, Herman (VDOT Contractor)   17:21Thank you. Thanks.
+Laboy, Alecia (VDOT Contractor)   17:23Have a good day.
+Sane, Sindhuja (VDOT Contractor)   17:24Thank you.
+Brain, Jonathan (VDOT Contractor)   17:24Thank you.
+Boma, Herman (VDOT Contractor) stopped transcription
+Here's a summary of the pattern meeting held on September 4, 2025:

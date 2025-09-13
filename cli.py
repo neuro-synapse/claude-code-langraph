@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from typing import Any, Dict
+import time
 
 from agent import app
 
@@ -81,6 +82,8 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         "require_approval": not args.approval,
         "require_final_approval": not args.final_approval,
         "temperature": args.temperature,
+        # Provide a stable thread_id to satisfy runtimes that expect it
+        "thread_id": os.environ.get("THREAD_ID", f"local-{int(time.time())}"),
     }
     if args.provider:
         cfg["provider"] = args.provider
@@ -155,4 +158,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

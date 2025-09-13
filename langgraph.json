@@ -1,8 +1,22 @@
 {
   "name": "meeting-transcript-processing-v2",
-  "description": "LangGraph workflow for meeting transcript theme extraction and documentation (Step 1 scaffold)",
-  "entrypoint": "agent.py:app",
+  "description": "LangGraph workflow for meeting transcript processing pipeline",
   "version": "0.1.0",
+  "graphs": {
+    "meeting": "agent:app"
+  },
+  "dependencies": [
+    "langgraph>=0.6.7",
+    "langchain-core>=0.3.76",
+    "pydantic>=2.11",
+    "langchain-google-genai==2.1.10",
+    "google-generativeai>=0.8.5",
+    "langchain-anthropic>=0.3.0",
+    "langchain-openai>=0.2.0"
+  ],
+  "env": {
+    "GOOGLE_API_KEY": "${GOOGLE_API_KEY}"
+  },
   "config": {
     "defaults": {
       "configurable": {
